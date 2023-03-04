@@ -470,7 +470,72 @@ HWND WinActive(global_struct &aSettings, LPCTSTR aTitle, LPCTSTR aText, LPCTSTR 
 		return NULL;
 }
 
+BOOL BetterEnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam)
+{
+	using NTSTATUS = LONG;
+	using pNtUserBuildHwndList = NTSTATUS(WINAPI*)
+	(
+		HDESK hDesktop,
+		HWND hwndNext,
+		BOOL bEnumChildren,
+		BOOL bIgnoreImmersive,
+		DWORD dwThreadId,
+		UINT cHwndsAllocated, // sizeof allocated HWND array
+		_In_ const HWND* aHwnds, // array of HWNDs
+		_Out_ UINT* cHwndsFound
+	);
+	static const auto NtUserBuildHwndList = reinterpret_cast<pNtUserBuildHwndList>(
+		GetProcAddress(GetModuleHandle(_T("win32u.dll")), "NtUserBuildHwndList"));
 
+	// This needs to be a reasonable estimate to cover most common 
+	// use-cases (in order to avoid reallocations and a subsequent 
+	// call to NtUserBuildHwndList). It's probably cheaper to allocate 
+	// a larger array to begin with, than call the function a second time.
+	auto cHwndsInitial{ 1024 };
+
+	auto Hwnds{ new HWND[cHwndsInitial] };
+	UINT cHwndsFound;
+
+	auto ntStatus = NtUserBuildHwndList(nullptr, nullptr, false, false, 0, cHwndsInitial, Hwnds, &cHwndsFound);
+
+	#define STATUS_BUFFER_TOO_SMALL (NTSTATUS)0xC0000023
+	if (ntStatus == STATUS_BUFFER_TOO_SMALL)
+	{
+		delete[] Hwnds;
+		Hwnds = new HWND[cHwndsFound];
+		ntStatus = NtUserBuildHwndList(nullptr, nullptr, false, false, 0, cHwndsFound, Hwnds, &cHwndsFound);
+	}
+
+	BOOL retVal;
+	#define STATUS_SUCCESS (NTSTATUS)0x00000000
+	if (ntStatus == STATUS_SUCCESS)
+	{
+		for (auto i{ 0 }; i < cHwndsFound; ++i) // for each HWND
+		{
+			const auto hwnd{ Hwnds[i] };
+
+			// MSDN: "If EnumWindowsProc returns zero, the return value is also zero.
+			// In this case, the callback function should call SetLastError to obtain
+			// a meaningful error code to be returned to the caller of EnumWindows."
+			if (!lpEnumFunc(hwnd, lParam))
+			{
+				retVal = FALSE;
+				goto exit_cleanup;
+			}
+		}
+
+		retVal = TRUE;
+	}
+	else // NtUserBuildHwndList returned another unexpected NTSTATUS.
+	{
+		SetLastError(ntStatus);
+		retVal = FALSE;
+	}
+	
+exit_cleanup:
+	delete[] Hwnds;
+	return retVal;
+}
 
 HWND WinExist(global_struct &aSettings, LPCTSTR aTitle, LPCTSTR aText, LPCTSTR aExcludeTitle, LPCTSTR aExcludeText
 	, bool aFindLastMatch, bool aUpdateLastUsed, HWND aAlreadyVisited[], int aAlreadyVisitedCount)
@@ -525,10 +590,65 @@ HWND WinExist(global_struct &aSettings, LPCTSTR aTitle, LPCTSTR aText, LPCTSTR a
 		//else fall through to the section below, since ws.mFoundCount and ws.mFoundParent were set by ws.IsMatch().
 	}
 	else // aWinTitle doesn't start with "ahk_id".  Try to find a matching window.
-		EnumWindows(EnumParentFind, (LPARAM)&ws);
+		BetterEnumWindows(EnumParentFind, (LPARAM)&ws);
+/*
+	{
+		const auto hModule{ GetModuleHandle(L"win32u.dll") };
+		const auto lpfnNtUserBuildHwndList = (LONG(*)(HDESK, HWND, BOOL, BOOL, DWORD, UINT, HWND*, UINT*)) GetProcAddress(hModule, "NtUserBuildHwndList");
+
+		auto hwnd_max{ 512 };
+		auto Hwnds{ new HWND[hwnd_max] };
+		UINT outCnt;
+		auto rv = lpfnNtUserBuildHwndList(nullptr, nullptr, false, false, 0, hwnd_max, Hwnds, &outCnt);
+
+		if (rv == 0xC0000023)
+		{
+			delete[] Hwnds;
+			Hwnds = new HWND[outCnt];
+		}
+
+		for (auto i{0}; i < outCnt; ++i)
+		{
+			auto hwnd{ Hwnds[i] };
+
+			if (!ws.mSettings->DetectWindow(hwnd)) // Skip windows the script isn't supposed to detect.
+				continue;
+
+			ws.SetCandidate(hwnd);
+			// If this window doesn't match, continue searching for more windows (via TRUE).  Likewise, if
+			// mFindLastMatch is true, continue searching even if this window is a match.  Otherwise, this
+			// first match is the one that's desired so stop here:
+			if (!ws.IsMatch())
+				continue;
+
+			if (ws.mFindLastMatch)
+				continue;
+			else
+				break;
+		}
+
+		delete[] Hwnds;
+	}
+	*/
+
+	/*
+NTSTATUS WINAPI NtUserBuildHwndList
+(
+ HDESK in_hDesk,
+ HWND  in_hWndNext,
+ BOOL  in_EnumChildren,
+ BOOL  in_RemoveImmersive,
+ DWORD in_ThreadID,
+ UINT  in_Max,
+ HWND *out_List,
+ UINT *out_Cnt
+);
+*/
 
 	UPDATE_AND_RETURN_LAST_USED_WINDOW(ws.mFoundParent) // This also does a "return".
 }
+
+
 
 
 
